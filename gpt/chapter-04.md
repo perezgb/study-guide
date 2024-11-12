@@ -307,14 +307,19 @@ In `MainActivity.kt`, we'll initialize the Player and load the content.
 At the top of `MainActivity.kt`, add the following imports:
 
 ```kotlin
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.compose.material.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.tooling.preview.Preview
+import com.example.dynamicsurveyapp.ui.theme.PlayerFrameworkTutorialTheme
 import com.intuit.player.android.AndroidPlayer
 import com.intuit.player.plugins.reference.assets.ReferenceAssetsPlugin
-import com.intuit.player.android.views.PlayerView
-import com.intuit.player.android.Asset
+import com.intuit.player.jvm.core.asset.Asset
+import com.intuit.player.jvm.core.player.state.PlayerFlowState
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
-import androidx.compose.runtime.livedata.observeAsState
-import androidx.lifecycle.lifecycleScope
 ```
 
 #### **4.4.1.2 Initialize the Player**
@@ -327,8 +332,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Initialize the Player with the Reference Assets Plugin
-        player = AndroidPlayer(plugins = listOf(ReferenceAssetsPlugin()))
+        // Initialize the Player with the Reference Assets Plugin and Custom Assets Plugin
+        player = AndroidPlayer(plugins = listOf(ReferenceAssetsPlugin(), CustomAssetsPlugin()))
 
         // Load and start the Player with content
         val content = loadContentFromAssets("survey_content.json")
@@ -337,7 +342,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             PlayerFrameworkTutorialTheme {
                 Surface(color = MaterialTheme.colors.background) {
-                    PlayerView(player = player)
+                    PlayerContent(player = player)
                 }
             }
         }
@@ -358,38 +363,112 @@ class MainActivity : ComponentActivity() {
 
 ### **4.4.2 Rendering Views with Jetpack Compose**
 
-The `PlayerView` composable function automatically observes the Player's state and renders the content using Jetpack Compose.
+Since there's no PlayerView provided by the framework, we'll create a custom composable function to render the Player's content.
 
-#### **4.4.2.1 Using PlayerView**
-
-Ensure that you have the following in your `setContent` block:
-
+#### 4.4.2.1 Creating PlayerContent Composable
 ```kotlin
-setContent {
-    PlayerFrameworkTutorialTheme {
-        Surface(color = MaterialTheme.colors.background) {
-            PlayerView(player = player)
+@Composable
+fun PlayerContent(player: AndroidPlayer) {
+    val playerState = remember { mutableStateOf<PlayerFlowState?>(null) }
+    val coroutineScope = rememberCoroutineScope()
+
+    DisposableEffect(player) {
+        val job = coroutineScope.launch {
+            player.state.collect { state ->
+                playerState.value = state
+            }
+        }
+        onDispose {
+            job.cancel()
+        }
+    }
+
+    when (val state = playerState.value) {
+        is PlayerFlowState.View -> {
+            // Render the asset
+            RenderAsset(asset = state.asset)
+        }
+        is PlayerFlowState.Finished -> {
+            // Handle flow finished state
+            Text("Survey Complete!")
+        }
+        is PlayerFlowState.Error -> {
+            // Handle error state
+            Text("An error occurred: ${state.exception.message}")
+        }
+        else -> {
+            // Show loading state
+            CircularProgressIndicator()
         }
     }
 }
 ```
+Explanation:
+- PlayerContent observes the Player's state using player.state.collect { ... }.
+- Depending on the state, it renders the appropriate UI:
+ - View: Calls RenderAsset to render the current asset.
+ - Finished: Displays a completion message.
+ - Error: Shows an error message.
+ - Loading or Null State: Displays a loading indicator.
 
-#### **4.4.2.2 Customizing Asset Rendering**
-
-For more control over how assets are rendered, you can implement custom composable functions.
-
-**Example**: Custom rendering for a `TextAsset`.
-
+#### **4.4.2.2 Implementing RenderAsset Composable**
 ```kotlin
 @Composable
-fun CustomRenderAsset(asset: Asset) {
+fun RenderAsset(asset: Asset) {
     when (asset.type) {
+        "view" -> {
+            // Assuming the view asset contains child assets
+            Column {
+                asset["assets"]?.let { assets ->
+                    if (assets is List<*>) {
+                        assets.forEach { childAsset ->
+                            if (childAsset is Asset) {
+                                RenderAsset(childAsset)
+                            }
+                        }
+                    }
+                }
+            }
+        }
         "text" -> {
-            val value = asset.properties["value"] as? String ?: ""
+            val value = asset["value"] as? String ?: ""
             Text(text = value)
         }
-        // Handle other asset types...
-        else -> Text("Unsupported asset type: ${asset.type}")
+        "input" -> {
+            val binding = asset["binding"] as? String
+            var textValue by remember { mutableStateOf("") }
+
+            TextField(
+                value = textValue,
+                onValueChange = { newValue ->
+                    textValue = newValue
+                    binding?.let {
+                        asset.context?.data?.set(it, newValue)
+                    }
+                },
+                label = { Text("Input") }
+            )
+        }
+        "action" -> {
+            val labelAsset = asset["label"] as? Asset
+            val buttonText = labelAsset?.let { (it["value"] as? String) ?: "Action" } ?: "Action"
+            val actionValue = asset["value"] as? String
+
+            Button(onClick = {
+                actionValue?.let { value ->
+                    asset.context?.player?.transition(value)
+                }
+            }) {
+                Text(text = buttonText)
+            }
+        }
+        "rating" -> {
+            // Implement the rating asset rendering
+            RatingAssetCompose(asset = asset)
+        }
+        else -> {
+            Text("Unsupported asset type: ${asset.type}")
+        }
     }
 }
 ```
